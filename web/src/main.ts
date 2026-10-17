@@ -5,6 +5,8 @@ import { AudioHost } from './audio';
 import type { HostMsg } from './worklet';
 import { DeviceLink } from './device';
 import { Editor, probeKey, ZOOM_MAX, ZOOM_MIN } from './editor';
+import { ScopeScreens } from './scope-view';
+import { EnvScreens } from './env-view';
 import { addToBank, bankPatches, buildBankTab } from './bank';
 import { onSavedChange, savedPatches, savePatch as keepPatch } from './saved';
 import { buildAssembliesTab, storeAssembly, storeTutorialAssembly } from './assemblies';
@@ -152,6 +154,16 @@ const patchCandidates = (): { name: string; patch: Patch }[] => {
 };
 const scope = new Scope($('scope'));
 host.onProbe = (key, data, sr) => scope.feed(key, data, sr);
+// Scope modules' screens: they stream while on screen and audio runs
+const screens = new ScopeScreens((msg) => host.send(msg), () => host.running && !host.muted);
+host.onView = (key, chans, sr) => screens.receive(key, chans, sr);
+// envelope shapes: drags edit through the editor (made below; used only after it exists)
+const envs = new EnvScreens((msg) => host.send(msg), () => host.running && !host.muted, {
+  set: (id, name, v) => editor.setParam(id, name, v),
+  begin: () => editor.beginEdit(),
+  limits: (type, name) => { const pd = DEFS[type].params.find((q) => q.name === name)!; return { min: pd.min, max: pd.max, def: pd.default }; },
+});
+host.onEnv = (key, states) => envs.receive(key, states);
 /** the sidebar's sliders whose thumbs are jacks (cable slack, zoom): see sideSlider below; filled once the editor exists */
 const sides = new Map<SideKey, SideSlider>();
 /** the zoom slider's setting (the user's zoom; a source adds to it) */
@@ -174,6 +186,7 @@ const editor = new Editor($('canvas'), loadSaved() ?? starterPatch(), {
   },
   onParam(id, name, value) {
     host.send({ t: 'param', id, name, value });
+    envs.changed();
     queueSave(editor.patch);
     if (editor.patch.modules.find((m) => m.id === id)?.type === ALLOC) {
       // a Voice allocator's setting changes the poly groups: the FM-1 takes the whole patch again
@@ -216,6 +229,10 @@ const editor = new Editor($('canvas'), loadSaved() ?? starterPatch(), {
       scope.remove(key);
       host.send({ t: 'unprobe', key });
     }
+  },
+  onScreens(list, envList) {
+    screens.sync(list);
+    envs.sync(envList);
   },
   onLayout(p) {
     queueSave(p);
@@ -287,6 +304,7 @@ editor.onZoom = (z, live) => {
 };
 host.onValues = (values) => {
   editor.showParameterValues(values);
+  envs.values(values);
   if (!host.running) scope.clearSamples();
 };
 
@@ -948,7 +966,7 @@ const syncAudioBtn = (): void => {
   audioBtn.title = on ? 'Stop all playing notes and silence the audio' : 'Start the audio';
   audioBtn.classList.toggle('on', on);
 };
-host.onState = syncAudioBtn;
+host.onState = () => { syncAudioBtn(); screens.state(); envs.state(); };
 syncAudioBtn();
 audioBtn.onclick = () => (host.running && !host.muted ? panic() : void startAudio());
 const noteKeys = attachKeyboard(sink, () => currentTab === 'patch' && !document.querySelector('dialog[open], [popover]:popover-open'), (o) => piano.setOctave(o));

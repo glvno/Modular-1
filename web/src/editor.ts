@@ -39,8 +39,12 @@ import {
   clearMorph,
   hasMorph,
   ensureMain,
+  EDITOR_ONLY,
+  rowDef,
 } from './patch';
 import { FlawPanel } from './flaws-panel';
+import type { ScreenSpec } from './scope-view';
+import type { EnvSpec } from './env-view';
 import { ARP_DEFAULT, ARP_MODES, ARP_RATES, ARP_SCALES, ARP_MAX_STEPS, fixArp, noteName, type ArpCfg } from './arp';
 import { EXCLUDED_TYPES,
   addChild,
@@ -81,7 +85,7 @@ import { EXCLUDED_TYPES,
   type AssemblyInst,
   type PortRef,
   type Rect,
-  type Target, bypassAssembly } from './assembly';
+  type Target, type ParamRef, GRID, bypassAssembly, paramColumns, moveParam, moveRef, setColumnBreak, setHeading } from './assembly';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const HISTORY = 40;
@@ -116,6 +120,8 @@ export interface EditorEvents {
   onProbe(key: string, id: number, port: string, kind: PortDef['kind'], label: string, on: boolean): void;
   /** cards were moved: positions changed, nothing the engine needs */
   onLayout(p: Patch): void;
+  /** the displays drawn this time (after every rebuild): Scope screens with what is cabled into each input, envelope shapes */
+  onScreens?(screens: ScreenSpec[], envs: EnvSpec[]): void;
   /** a message for the status line */
   onError(msg: string): void;
   /** "save" on an assembly: put this definition into the library */
@@ -152,14 +158,23 @@ type Pt = { x: number; y: number };
 /** the footprint of a new card for the free-spot search: a grid cell less its gutters */
 const CARD_W = 300;
 const CARD_H = 540;
+/** a collapsed assembly card's footprint width: a grid cell per column (`.module.assembly.cols` in style.css) */
+const cardWidth = (params: ParamRef[]): number => {
+  const n = paramColumns(params).length;
+  return n > 1 ? n * GRID.x - 20 : CARD_W;
+};
 /** jacks on each side edge of a card; the rest hang off its bottom edge */
 const EDGE_JACKS = 4;
 /** an input for a card's edge layout: its row element and which port it is (a parameter's dedicated input joins its row) */
 type EdgePort = { el: HTMLElement; module: number; port: string };
+/** a parameter for a card's edge layout: its row, its dedicated input, a column break before it, rows above it (a heading) */
+type EdgeParam = { el: HTMLElement; input?: Target; col?: boolean; above?: HTMLElement[] };
 /** an entry of a card's menu: `key` is the shortcut shown at the right, `rule` a line above it */
 type MenuItem = { text: string; run: () => void; key?: string; danger?: boolean; rule?: boolean };
 /** a drop is judged by the card's header (where it is held), this far below its top */
 const HEAD_Y = 15;
+/** a touch held this long without moving is a long press */
+const LONG_PRESS_MS = 500;
 
 export class Editor {
   patch: Patch;
@@ -273,8 +288,8 @@ export class Editor {
     if (msgs.length) this.ev.onError(msgs.join('; '));
   }
 
-  /** where the next card goes: the first grid cell that no visible card, container or frame touches */
-  private slot(): Pt {
+  /** where the next card goes: the first grid cell that no visible card, container or frame touches; `w` = its width */
+  private slot(w = CARD_W): Pt {
     const rect = (el: HTMLElement): Rect => ({ x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight });
     const occupied = [...this.cards.values(), ...this.containers.values(), ...this.frames.values()].map(rect);
     // before the first layout the elements have no size: fall back to the model's positions
@@ -283,9 +298,9 @@ export class Editor {
       const hiddenAsm = hiddenAssemblies(this.patch);
       occupied.length = 0;
       for (const m of this.patch.modules) if (!hidden.has(m.id)) occupied.push({ x: m.x, y: m.y, w: CARD_W, h: CARD_H });
-      for (const a of assembliesOf(this.patch)) if (!a.open && !hiddenAsm.has(a.id)) occupied.push({ x: a.x, y: a.y, w: CARD_W, h: CARD_H });
+      for (const a of assembliesOf(this.patch)) if (!a.open && !hiddenAsm.has(a.id)) occupied.push({ x: a.x, y: a.y, w: cardWidth(a.params), h: CARD_H });
     }
-    return freeSpot(occupied, CARD_W, CARD_H);
+    return freeSpot(occupied, w, CARD_H);
   }
 
   add(type: string): void {
@@ -297,7 +312,7 @@ export class Editor {
 
   /** put a saved assembly into the patch */
   insert(def: AssemblyDef): void {
-    const at = this.slot();
+    const at = this.slot(cardWidth(def.params));
     if (this.change(() => insertAssembly(this.patch, DEFS, def, at.x, at.y))) this.ev.onError(`"${def.name}" inserted. Knob assignments (K1..K4) are not kept: tick them in the patch.`);
   }
 
@@ -405,6 +420,8 @@ export class Editor {
 
   rebuild(): void {
     this.cancelArm();
+    this.screens = [];
+    this.envScreens = [];
     this.parameterDisplays = [];
     this.sliderPorts = [];
     this.cablePaths = [];
@@ -443,6 +460,7 @@ export class Editor {
     for (const a of visible) if (!a.open) this.modulesEl.append(this.container(a, perVoice(a), parentOf(this.patch, a.id)));
     this.applyStack();
     this.flawPanel?.sync();
+    this.ev.onScreens?.(this.screens, this.envScreens);
     this.sizeCanvas();
     requestAnimationFrame(() => {
       this.layoutFrames();
@@ -632,7 +650,7 @@ export class Editor {
     const tools = document.createElement('span');
     tools.className = 'tools';
     if (open) tools.append(this.outButton(open, () => this.takeOutModule(open, m)));
-    if (def.type !== 'fm1' && def.type !== 'output') tools.append(this.bypassButton(m, def, el));
+    if (def.type !== 'fm1' && def.type !== 'output' && !EDITOR_ONLY.has(def.type)) tools.append(this.bypassButton(m, def, el));
     const menu = (at: Pt): void => this.contextMenu(m, def, at);
     tools.append(this.moreButton(menu));
     head.append(title, tools);
@@ -648,12 +666,111 @@ export class Editor {
       else if (this.unrouted(m, p.name)) ins.push({ el: this.unroutedPort(m, p), module: m.id, port: p.name });
     }
     const outs = def.outputs.map((p) => this.port(m, p, 'out', { open, short: true }));
-    const params = def.params.map((pd) => ({ el: this.paramRow(m, def, pd, { open }), input: pd.input ? { module: m.id, port: pd.input } : undefined }));
+    // its displays first (an envelope's shape, the Scope's screen), then the parameters
+    const params = [...(def.views ?? []), ...def.params.filter((pd) => !pd.onScreen)].map((pd) => ({ el: this.paramRow(m, def, pd, { open }), input: pd.input ? { module: m.id, port: pd.input } : undefined }));
     // a second Main card (from an old patch) keeps its B side and arpeggiator under the rows
     const extra = def.type === 'fm1' ? [this.morphRow(), this.arpPanel()] : [];
     body.append(...this.edgeLayout(ins, outs, params, extra));
     el.append(head, body);
     return el;
+  }
+
+  /** the Scope screens and envelope shapes drawn in this rebuild (onScreens) */
+  private screens: ScreenSpec[] = [];
+  private envScreens: EnvSpec[] = [];
+
+  /** an undo step around a change made outside the editor's own controls (a drag on an envelope's shape): call the result when done */
+  beginEdit(): () => void {
+    const before = JSON.stringify(this.patch);
+    return () => {
+      if (JSON.stringify(this.patch) === before) return;
+      this.history.push(before);
+      if (this.history.length > HISTORY) this.history.shift();
+      this.future = [];
+    };
+  }
+
+  /** a Scope's screen: it goes on an assembly card like a parameter (pick mode, Cmd / Ctrl-click) */
+  private screenRow(m: ModuleInst, pd: ParamDef, o: { open?: AssemblyInst; label?: string; rename?: () => void }): HTMLElement {
+    const open = o.open;
+    const row = document.createElement('div');
+    row.className = 'param screen';
+    const isScope = m.type === 'scope'; // else an envelope's shape
+    const screen = document.createElement('div');
+    screen.className = isScope ? 'scope-screen' : 'scope-screen env-screen';
+    row.append(screen);
+    // its name in the corner: an assembly card's label for it (renamable there), else nothing
+    if (o.label) {
+      const name = document.createElement('span');
+      name.className = 'screen-name' + (isScope ? '' : ' right');
+      name.textContent = o.label;
+      if (o.rename) {
+        name.classList.add('rename');
+        name.title = 'click to rename';
+        name.onclick = (e) => { e.preventDefault(); o.rename!(); };
+      }
+      row.append(name);
+    }
+    if (open) {
+      const on = isPromoted(open, m.id, pd.name);
+      row.classList.toggle('shown', on);
+      this.promoteClick(row, open, () => (on ? demote(open, m.id, pd.name) : promote(open, m.id, pd.name)));
+      if (this.picking(open)) row.append(this.pickBox(on));
+    }
+    if (!isScope) {
+      this.envScreens.push({ m, el: screen });
+      return row;
+    }
+    const chans = ['a', 'b'].map((port) => this.patch.cables
+      .filter((c) => c.to.module === m.id && c.to.port === port)
+      .flatMap((c) => {
+        const from = this.patch.modules.find((x) => x.id === c.from.module);
+        const kind = from && DEFS[from.type].outputs.find((q) => q.name === c.from.port)?.kind;
+        return kind ? [{ id: c.from.module, port: c.from.port, kind }] : [];
+      }));
+    this.screens.push({ m, el: screen, chans });
+    row.append(this.scopeTools(m));
+    return row;
+  }
+
+  /** a Scope screen's hover toolbar: its window (− / +, a 1-2-5 series) and time / spectrum */
+  private scopeTools(m: ModuleInst): HTMLElement {
+    const def = DEFS[m.type];
+    const bar = document.createElement('div');
+    bar.className = 'scope-tools';
+    const timePd = def.params.find((q) => q.name === 'time')!;
+    const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].filter((v) => v >= timePd.min && v <= timePd.max);
+    const value = document.createElement('span');
+    value.className = 'scope-time';
+    const show = (): void => {
+      const t = m.params.time ?? timePd.default;
+      const { num, unit } = t >= 1000 ? formatValue(t / 1000, 's', false) : formatValue(t, timePd.unit, false);
+      value.textContent = `${num} ${unit}`;
+    };
+    const step = (dir: 1 | -1): void => {
+      const t = m.params.time ?? timePd.default;
+      const next = dir > 0 ? steps.find((v) => v > t * 1.001) : [...steps].reverse().find((v) => v < t * 0.999);
+      if (next === undefined) return;
+      this.setParam(m.id, 'time', next);
+      show();
+    };
+    const shorter = this.button('−', 'Shorter window', () => step(-1), 'sm');
+    const longer = this.button('+', 'Longer window', () => step(1), 'sm');
+    const modes = (def.params.find((q) => q.name === 'mode')!.choices ?? []).map((name, i) => {
+      const b = this.button(name === 'spectrum' ? 'FFT' : 'Wave', name === 'spectrum' ? 'Spectrum' : 'Waveform', () => {
+        this.setParam(m.id, 'mode', i);
+        for (const [k, x] of modes.entries()) x.setAttribute('aria-pressed', String(k === i));
+      }, 'sm');
+      b.setAttribute('aria-pressed', String(Math.round(m.params.mode ?? 0) === i));
+      return b;
+    });
+    const rule = document.createElement('span');
+    rule.className = 'scope-rule';
+    show();
+    bar.append(shorter, value, longer, rule, ...modes);
+    // the toolbar's presses are its own: no card drag, no cable, no pick
+    bar.addEventListener('pointerdown', (e) => e.stopPropagation());
+    return bar;
   }
 
   /** the tag before a card's title (VCO, VCF, ENV ...), coloured by the module's family */
@@ -669,27 +786,49 @@ export class Editor {
    * A card's body: rows of [input jack | parameter | output jack]. A parameter's dedicated input (ParamDef.input) sits on
    * its row; at most EDGE_JACKS jacks hang on each side edge (the outputs from the top, the other inputs in the free rows),
    * the rest hang off the bottom edge with their labels above them. `extra` goes under the rows, across the card.
+   * An assembly card can have columns (`col` starts one) and rows above a parameter (`above`: its heading): then the
+   * inputs hang on the first column's left edge, the outputs on the last one's right edge, a dedicated input of a later
+   * column joins the free inputs, and each side edge takes as many jacks as the tallest column has rows.
    */
-  private edgeLayout(ins: EdgePort[], outs: HTMLElement[], params: { el: HTMLElement; input?: Target }[], extra: HTMLElement[] = []): HTMLElement[] {
-    type Row = { l: HTMLElement | null; m: HTMLElement | null; r: HTMLElement | null };
-    const rows: Row[] = params.map((p) => ({ l: null, m: p.el, r: null }));
+  private edgeLayout(ins: EdgePort[], outs: HTMLElement[], params: EdgeParam[], extra: HTMLElement[] = []): HTMLElement[] {
+    type Item = { el: HTMLElement; param?: EdgeParam };
+    const cols: Item[][] = [[]];
+    for (const p of params) {
+      if (p.col && cols[cols.length - 1].length) cols.push([]);
+      const c = cols[cols.length - 1];
+      for (const el of p.above ?? []) c.push({ el });
+      c.push({ el: p.el, param: p });
+    }
+    const n = cols.length;
+    const cap = n > 1 ? Math.max(EDGE_JACKS, ...cols.map((c) => c.length)) : EDGE_JACKS;
+    type Row = { l: HTMLElement | null; m: (HTMLElement | null)[]; r: HTMLElement | null };
+    const rows: Row[] = [];
+    const row = (i: number): Row => {
+      while (rows.length <= i) rows.push({ l: null, m: Array<HTMLElement | null>(n).fill(null), r: null });
+      return rows[i];
+    };
+    cols.forEach((c, ci) => c.forEach((it, ri) => (row(ri).m[ci] = it.el)));
     const free = [...ins];
     let fixed = 0;
-    params.forEach((p, i) => {
-      const k = p.input ? free.findIndex((x) => x.module === p.input!.module && x.port === p.input!.port) : -1;
+    cols[0].forEach((it, ri) => {
+      const input = it.param?.input;
+      const k = input ? free.findIndex((x) => x.module === input.module && x.port === input.port) : -1;
       if (k < 0) return;
-      rows[i].l = free.splice(k, 1)[0].el;
+      row(ri).l = free.splice(k, 1)[0].el;
       fixed++;
     });
-    const sideIns = free.splice(0, Math.max(0, EDGE_JACKS - fixed));
-    const sideOuts = outs.slice(0, EDGE_JACKS);
-    while (rows.length < sideOuts.length) rows.push({ l: null, m: null, r: null });
-    for (const x of sideIns) {
-      let r = rows.find((y) => !y.l);
-      if (!r) rows.push((r = { l: null, m: null, r: null }));
-      r.l = x.el;
-    }
-    sideOuts.forEach((el, i) => (rows[i].r = el));
+    // a side edge's places: the rows of its column's parameters (not of its headings), then rows under the column
+    const slots = (c: Item[]): number[] => {
+      const s = c.flatMap((it, ri) => (it.param ? [ri] : []));
+      for (let i = c.length; s.length < cap; i++) s.push(i);
+      return s;
+    };
+    const sideIns = free.splice(0, Math.max(0, cap - fixed));
+    const left = slots(cols[0]).filter((ri) => !rows[ri]?.l);
+    sideIns.forEach((x, i) => (row(left[i]).l = x.el));
+    const sideOuts = outs.slice(0, cap);
+    const right = slots(cols[n - 1]);
+    sideOuts.forEach((el, i) => (row(right[i]).r = el));
     const cell = (cls: string, child: HTMLElement | null): HTMLElement => {
       const c = document.createElement('div');
       c.className = cls;
@@ -697,16 +836,37 @@ export class Editor {
       return c;
     };
     const grid = document.createElement('div');
-    grid.className = 'erows';
-    for (const r of rows) {
-      const row = document.createElement('div');
-      row.className = 'erow';
-      row.append(cell('el', r.l), cell('em', r.m), cell('er', r.r));
-      grid.append(row);
+    grid.className = 'erows' + (n > 1 ? ' multi' : '');
+    if (n === 1) for (const r of rows) {
+      const el = document.createElement('div');
+      el.className = 'erow';
+      el.append(cell('el', r.l), cell('em', r.m[0]), cell('er', r.r));
+      grid.append(el);
+    }
+    else {
+      // each column stacks its own rows; the first one holds the input jacks' track, the last one the outputs'
+      grid.style.gridTemplateColumns = `auto repeat(${n}, minmax(0, 1fr)) auto`;
+      cols.forEach((c, ci) => {
+        const first = ci === 0, last = ci === n - 1;
+        let len = c.length;
+        rows.forEach((r, ri) => { if ((first && r.l) || (last && r.r)) len = Math.max(len, ri + 1); });
+        const col = document.createElement('div');
+        col.className = 'ecol';
+        col.style.gridColumn = `${first ? 1 : ci + 2} / ${last ? -1 : ci + 3}`;
+        for (const r of rows.slice(0, len)) {
+          const el = document.createElement('div');
+          el.className = 'erow';
+          if (first) el.append(cell('el', r.l));
+          el.append(cell('em', r.m[ci]));
+          if (last) el.append(cell('er', r.r));
+          col.append(el);
+        }
+        grid.append(col);
+      });
     }
     const out: HTMLElement[] = rows.length ? [grid] : [];
     out.push(...extra);
-    const bottomIns = free.map((x) => x.el), bottomOuts = outs.slice(EDGE_JACKS);
+    const bottomIns = free.map((x) => x.el), bottomOuts = outs.slice(cap);
     if (bottomIns.length || bottomOuts.length) {
       const foot = document.createElement('div');
       foot.className = 'mfoot';
@@ -748,6 +908,7 @@ export class Editor {
   private refreshers = new WeakMap<HTMLElement, () => void>();
 
   private paramRow(m: ModuleInst, def: ModuleDef, pd: ParamDef, o: { open?: AssemblyInst; label?: string; rename?: () => void } = {}): HTMLElement {
+    if (pd.screen) return this.screenRow(m, pd, o);
     const row = document.createElement('div');
     row.className = 'param bar';
     const knob = def.type === 'fm1' && isKnob(pd.name) ? pd.name : null;
@@ -1218,6 +1379,13 @@ export class Editor {
         if (!a.open) this.toggleOpen(a);
         this.pickAsm = a.id;
         this.rebuild();
+      } },
+      { text: this.arrangeAsm === a.id ? 'Done arranging' : 'Arrange the card', run: () => {
+        if (this.arrangeAsm === a.id) return void this.endPick();
+        this.pickAsm = null;
+        this.arrangeAsm = a.id;
+        if (a.open) this.toggleOpen(a);
+        else this.rebuild();
       } },
       { text: 'Rename', key: 'dbl-click', run: () => this.rename(a) },
       { text: 'Save to library', rule: true, run: () => this.saveAssembly(a) },
@@ -1749,8 +1917,10 @@ export class Editor {
 
   /** leave pick mode (Esc); false when it was not on */
   endPick(): boolean {
-    if (this.pickAsm === null) return false;
+    if (this.pickAsm === null && this.arrangeAsm === null) return false;
     this.pickAsm = null;
+    this.arrangeAsm = null;
+    this.newHeading = null;
     this.rebuild();
     return true;
   }
@@ -1870,9 +2040,14 @@ export class Editor {
    * The collapsed assembly: one card with the exposed ports and the promoted parameters. Inside an expanded parent (`open`)
    * its rows get the parent's expose / pin toggles, like a member card's.
    */
-  private container(a: AssemblyInst, perVoice: number, open?: AssemblyInst): HTMLElement {
+  private container(a: AssemblyInst, perVoice: number, parent?: AssemblyInst): HTMLElement {
+    const arranging = this.arrangeAsm === a.id;
+    // while its own card is arranged, the parent's pick toggles stay off it
+    const open = arranging ? undefined : parent;
+    const ncols = paramColumns(a.params).length;
     const el = document.createElement('div');
-    el.className = 'module assembly' + (a.poly ? ' poly' : '') + (open ? ' member' : '') + (a.bypass ? ' off' : '') + (this.picking(open) ? ' picking' : '') + (this.selectedAsm.has(a.id) ? ' selected' : '');
+    el.className = 'module assembly' + (a.poly ? ' poly' : '') + (parent ? ' member' : '') + (a.bypass ? ' off' : '') + (this.picking(open) ? ' picking' : '') + (this.selectedAsm.has(a.id) ? ' selected' : '') + (arranging ? ' arranging' : '') + (ncols > 1 ? ' cols' : '');
+    if (ncols > 1) el.style.setProperty('--cols', String(ncols));
     el.style.left = `${a.x}px`;
     el.style.top = `${a.y}px`;
     el.dataset.asm = String(a.id);
@@ -1881,7 +2056,12 @@ export class Editor {
     head.className = 'mhead';
     const tools = document.createElement('span');
     tools.className = 'tools';
-    if (open) tools.append(this.outButton(open, () => this.takeOutAssembly(open, a)));
+    if (arranging) {
+      const done = this.button('done', 'Done arranging (Esc)', () => this.endPick(), 'sm pick-btn');
+      done.setAttribute('aria-pressed', 'true');
+      tools.append(done);
+    }
+    if (parent) tools.append(this.outButton(parent, () => this.takeOutAssembly(parent, a)));
     tools.append(...this.assemblyButtons(a));
     const title = this.titleOf(a, perVoice);
     title.prepend(this.tag(null));
@@ -1893,22 +2073,35 @@ export class Editor {
     body.className = 'mbody';
     const mod = (id: number): ModuleInst => this.patch.modules.find((m) => m.id === id)!;
     const ins: EdgePort[] = [];
-    for (const r of a.inputs) {
+    a.inputs.forEach((r, i) => {
       const m = mod(r.module);
       const pd = DEFS[m.type].inputs.find((q) => q.name === r.port)!;
-      if (isPin(pd.name) && !this.unrouted(m, pd.name)) continue; // routed pins are shown as promoted parameters
-      ins.push({ el: this.port(m, pd, 'in', { label: r.label, rename: () => this.renameRef(r, 'input'), also: r.also, open }), module: m.id, port: pd.name });
-    }
-    const outs = a.outputs.map((r) => {
+      if (isPin(pd.name) && !this.unrouted(m, pd.name)) return; // routed pins are shown as promoted parameters
+      const port = this.port(m, pd, 'in', { label: r.label, rename: () => this.renameRef(r, 'input'), also: r.also, open });
+      if (arranging) this.arrangeItem(port, a, 'in', i);
+      ins.push({ el: port, module: m.id, port: pd.name });
+    });
+    const outs = a.outputs.map((r, i) => {
       const m = mod(r.module);
       const pd = DEFS[m.type].outputs.find((q) => q.name === r.port)!;
-      return this.port(m, pd, 'out', { label: r.label, rename: () => this.renameRef(r, 'output'), open });
+      const port = this.port(m, pd, 'out', { label: r.label, rename: () => this.renameRef(r, 'output'), open });
+      if (arranging) this.arrangeItem(port, a, 'out', i);
+      return port;
     });
-    const params = a.params.map((r) => {
+    const params = a.params.flatMap((r, i): EdgeParam[] => {
       const m = mod(r.module);
       const def = DEFS[m.type];
-      const pd = def.params.find((q) => q.name === r.param)!;
-      return { el: this.paramRow(m, def, pd, { label: r.label, rename: () => this.renameRef(r, 'parameter'), open }), input: pd.input ? { module: m.id, port: pd.input } : undefined };
+      const pd = rowDef(def, r.param)!;
+      if (pd.onScreen) return [];
+      const row = this.paramRow(m, def, pd, { label: r.label, rename: () => this.renameRef(r, 'parameter'), open });
+      const above: HTMLElement[] = [];
+      if (arranging && r.col) above.push(this.columnChip(a, i));
+      if (r.head || (arranging && this.newHeading === `${a.id}:${i}`)) above.push(this.heading(a, i, arranging));
+      if (arranging) {
+        this.arrangeItem(row, a, 'param', i);
+        row.append(this.arrangeTools(a, i));
+      }
+      return [{ el: row, input: pd.input ? { module: m.id, port: pd.input } : undefined, col: !!r.col, above }];
     });
     body.append(...this.edgeLayout(ins, outs, params));
     if (!a.inputs.length && !a.outputs.length && !a.params.length) {
@@ -1919,6 +2112,163 @@ export class Editor {
     }
     el.append(head, body);
     return el;
+  }
+
+  // ---- arranging a collapsed assembly card: the order of its rows and jacks, column breaks, headings
+
+  /** the collapsed assembly whose card is being arranged (its menu's Arrange the card), else null */
+  private arrangeAsm: number | null = null;
+  /** a heading just added (`asm:row`): drawn as an empty field with the focus until it gets a text */
+  private newHeading: string | null = null;
+
+  /** a layout change of an assembly card: undoable, saved, no engine reload */
+  private layoutChange(fn: () => void): void {
+    const before = JSON.stringify(this.patch);
+    fn();
+    if (JSON.stringify(this.patch) === before) return this.rebuild();
+    this.history.push(before);
+    if (this.history.length > HISTORY) this.history.shift();
+    this.future = [];
+    this.rebuild();
+    this.ev.onLayout(this.patch);
+  }
+
+  /** a heading above row `i`: plain text, a field while arranging (empty = gone) */
+  private heading(a: AssemblyInst, i: number, arranging: boolean): HTMLElement {
+    const r = a.params[i];
+    const h = document.createElement('div');
+    h.className = 'ehead';
+    h.dataset.arrKind = 'param';
+    h.dataset.arrIndex = String(i);
+    h.dataset.arrBefore = '1'; // a row dropped on a heading goes under it
+    if (!arranging) {
+      h.textContent = r.head ?? '';
+      h.title = 'double-click to rename';
+      h.ondblclick = () => {
+        const v = window.prompt('Heading (empty removes it)', r.head ?? '');
+        if (v !== null) this.layoutChange(() => setHeading(a.params, i, v));
+      };
+      return h;
+    }
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = r.head ?? '';
+    input.placeholder = 'heading';
+    input.maxLength = 40;
+    input.setAttribute('aria-label', 'Heading');
+    const commit = (): void => {
+      if (this.newHeading === `${a.id}:${i}`) this.newHeading = null;
+      this.layoutChange(() => setHeading(a.params, i, input.value));
+    };
+    input.onchange = commit;
+    input.onblur = () => { if (!input.value.trim()) commit(); };
+    input.onkeydown = (e) => {
+      e.stopPropagation(); // typing is not shortcuts
+      if (e.key === 'Enter' || e.key === 'Escape') input.blur();
+    };
+    input.onpointerdown = (e) => e.stopPropagation();
+    const x = this.button('×', 'Remove the heading', () => this.layoutChange(() => setHeading(a.params, i, '')), 'sm arr-x');
+    h.append(input, x);
+    if (this.newHeading === `${a.id}:${i}`) requestAnimationFrame(() => input.focus());
+    return h;
+  }
+
+  /** while arranging: the mark of a column break above the column's first row, with a button to join the columns */
+  private columnChip(a: AssemblyInst, i: number): HTMLElement {
+    const c = document.createElement('div');
+    c.className = 'ebreak';
+    c.textContent = 'new column';
+    c.append(this.button('×', 'Join with the column before', () => this.layoutChange(() => setColumnBreak(a.params, i, false)), 'sm arr-x'));
+    return c;
+  }
+
+  /** while arranging: on a row's top edge, + heading and a column break before it */
+  private arrangeTools(a: AssemblyInst, i: number): HTMLElement {
+    const t = document.createElement('span');
+    t.className = 'arr-tools';
+    const r = a.params[i];
+    if (!r.head) t.append(this.button('+ heading', 'A heading above this row', () => {
+      this.newHeading = `${a.id}:${i}`;
+      this.rebuild();
+    }, 'sm'));
+    if (i > 0 && !r.col) t.append(this.button('↦ column', 'Start a new column with this row', () => this.layoutChange(() => setColumnBreak(a.params, i, true)), 'sm'));
+    for (const b of t.querySelectorAll('button')) b.addEventListener('pointerdown', (e) => e.stopPropagation());
+    return t;
+  }
+
+  /**
+   * While arranging, a row or jack can be dragged before or after another of its kind (rows among rows, inputs among
+   * inputs, outputs among outputs). A mouse drags at once, a finger after a long press.
+   */
+  private arrangeItem(el: HTMLElement, a: AssemblyInst, kind: 'param' | 'in' | 'out', index: number): void {
+    el.dataset.arrKind = kind;
+    el.dataset.arrIndex = String(index);
+    el.classList.add('arr-item');
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || (e.target as HTMLElement).closest('.arr-tools, input[type=text]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const card = el.closest<HTMLElement>('.module')!;
+      const x0 = e.clientX, y0 = e.clientY;
+      let live = e.pointerType !== 'touch';
+      let started = false;
+      let target: { el: HTMLElement; after: boolean } | null = null;
+      const hold = live ? 0 : window.setTimeout(() => { live = true; el.classList.add('arr-held'); }, LONG_PRESS_MS);
+      const mark = (t: typeof target): void => {
+        card.querySelectorAll('.arr-before, .arr-after').forEach((x) => x.classList.remove('arr-before', 'arr-after'));
+        if (t) t.el.classList.add(t.after ? 'arr-after' : 'arr-before');
+      };
+      const move = (ev: PointerEvent): void => {
+        if (!live) {
+          if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 8) end(); // a swipe, not a long press
+          return;
+        }
+        if (!started && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
+        started = true;
+        el.classList.add('arr-dragging');
+        target = this.arrangeTarget(card, kind, el, ev.clientX, ev.clientY);
+        mark(target);
+      };
+      const end = (): void => {
+        window.clearTimeout(hold);
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', end);
+        el.classList.remove('arr-dragging', 'arr-held');
+        mark(null);
+      };
+      const up = (): void => {
+        const t = target;
+        end();
+        if (!started || !t) return;
+        const to = Number(t.el.dataset.arrIndex);
+        const after = t.after && !t.el.dataset.arrBefore;
+        this.layoutChange(() => {
+          if (kind === 'param') a.params = moveParam(a.params, index, to, after);
+          else if (kind === 'in') a.inputs = moveRef(a.inputs, index, to, after);
+          else a.outputs = moveRef(a.outputs, index, to, after);
+        });
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', end);
+    }, true);
+  }
+
+  /** the item of `kind` nearest the pointer on the card, and whether the drop goes after it (below; right of a bottom jack) */
+  private arrangeTarget(card: HTMLElement, kind: string, self: HTMLElement, x: number, y: number): { el: HTMLElement; after: boolean } | null {
+    let best: { el: HTMLElement; after: boolean } | null = null;
+    let dist = Infinity;
+    for (const c of card.querySelectorAll<HTMLElement>(`[data-arr-kind="${kind}"]`)) {
+      if (c === self) continue;
+      const r = c.getBoundingClientRect();
+      const d = Math.hypot(Math.max(r.left - x, 0, x - r.right), Math.max(r.top - y, 0, y - r.bottom));
+      if (d >= dist) continue;
+      dist = d;
+      const across = c.classList.contains('bottom');
+      best = { el: c, after: across ? x > r.left + r.width / 2 : y > r.top + r.height / 2 };
+    }
+    return best;
   }
 
   private renameRef(r: { label: string }, what: string): void {
@@ -2018,7 +2368,7 @@ export class Editor {
           onUp();
           const m = this.patch.modules.find((x) => x.id === Number(card.dataset.id));
           if (m) this.contextMenu(m, DEFS[m.type], { x: m.x + 20, y: m.y + 30 });
-        }, 500);
+        }, LONG_PRESS_MS);
       }
       const onMove = (ev: PointerEvent): void => {
         if (press && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 8) {

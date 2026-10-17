@@ -23,11 +23,11 @@
 // Port indices are positions in ModuleDef.outputs / inputs (explicit ports first, then the `<param>_cv` inputs).
 
 import { DEFS } from './modules';
-import { flawOf, hasMorph, MAX_MODULES, MAX_PARTS, SOURCES, type Patch } from './patch';
+import { EDITOR_ONLY, flawOf, hasMorph, MAX_MODULES, MAX_PARTS, SOURCES, type Patch } from './patch';
 import { deviceView, MAX_POLY, type DeviceGroup } from './poly';
 import { cpuEstimate, type CpuEstimate } from './cpu';
 
-export const TYPE_ORDER: string[] = Object.keys(DEFS);
+export const TYPE_ORDER: string[] = Object.keys(DEFS).filter((t) => !EDITOR_ONLY.has(t));
 /** bytes of a poly group record: parts, assign, legato, priority, then five flaw bytes per part (engine.h ENG_GROUP_REC) */
 export const GROUP_REC = 4 + 5 * MAX_PARTS;
 export const MAX_CABLES = 192;

@@ -4,6 +4,11 @@ import { DEFS } from './modules';
 import type { Patch } from './patch';
 import type { ArpCfg } from './arp';
 import { encodePatch, toQ16 } from './patchbin';
+import { deviceView } from './poly';
+
+/** a module's index on the FM-1: its place in the patch's device form (poly.ts deviceView: editor-only modules such as
+ * the Scope are not there, so the editor's order is not the device's); -1 when the device does not have it */
+export const deviceIndex = (patch: Patch, moduleId: number): number => deviceView(patch).patch.modules.findIndex((m) => m.id === moduleId);
 import { arpFrame, attFrame, bypassFrame, chunkFrames, CMD, parseSlot, rangeFrame, slotEraseFrame, slotFrame, slotInfoFrame, SLOTS, type SlotInfo, commitFrame, helloFrame, paramFrame, parse, parseAck, parseInfo, STATUS_TEXT, storeFrame, type Ack, type Info } from './protocol';
 
 const NAME = /felucca|fm-?1|modular/i;
@@ -161,9 +166,9 @@ export class DeviceLink {
   /** A live parameter change; the latest value per parameter is sent every 25 ms. */
   param(patch: Patch, moduleId: number, name: string, value: number): void {
     if (!this.connected) return;
-    const mi = patch.modules.findIndex((m) => m.id === moduleId);
+    const mi = deviceIndex(patch, moduleId);
     if (mi < 0) return;
-    const pi = DEFS[patch.modules[mi].type].params.findIndex((p) => p.name === name);
+    const pi = DEFS[patch.modules.find((m) => m.id === moduleId)!.type].params.findIndex((p) => p.name === name);
     if (pi < 0) return;
     this.paramQueue.set(`${mi}.${pi}`, [mi, pi, toQ16(value)]);
     if (!this.paramTimer)
@@ -178,23 +183,23 @@ export class DeviceLink {
   /** a live attenuverter change (input 0 = p1, 1 = p2) */
   att(patch: Patch, moduleId: number, index: number, value: number): void {
     if (!this.connected) return;
-    const mi = patch.modules.findIndex((m) => m.id === moduleId);
+    const mi = deviceIndex(patch, moduleId);
     if (mi >= 0) this.out!.send(attFrame(mi, index, toQ16(value)));
   }
 
   /** a macro range of p1 / p2 (index 0 / 1) on a parameter, or its removal */
   range(patch: Patch, moduleId: number, index: number, name: string, range: [number, number] | null): void {
     if (!this.connected) return;
-    const mi = patch.modules.findIndex((m) => m.id === moduleId);
+    const mi = deviceIndex(patch, moduleId);
     if (mi < 0) return;
-    const pi = DEFS[patch.modules[mi].type].params.findIndex((q) => q.name === name);
+    const pi = DEFS[patch.modules.find((m) => m.id === moduleId)!.type].params.findIndex((q) => q.name === name);
     if (pi >= 0) this.out!.send(rangeFrame(mi, index, pi, range));
   }
 
   /** a module's bypass switch */
   bypass(patch: Patch, moduleId: number, on: boolean): void {
     if (!this.connected) return;
-    const mi = patch.modules.findIndex((m) => m.id === moduleId);
+    const mi = deviceIndex(patch, moduleId);
     if (mi >= 0) this.out!.send(bypassFrame(mi, on));
   }
 

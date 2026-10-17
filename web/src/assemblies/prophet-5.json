@@ -377,6 +377,36 @@
         "k3": [],
         "k4": []
       }
+    },
+    {
+      "id": 15,
+      "type": "scope",
+      "x": 2240,
+      "y": 0,
+      "params": {
+        "time": 16,
+        "mode": 0
+      }
+    },
+    {
+      "id": 16,
+      "type": "scope",
+      "x": 2240,
+      "y": 560,
+      "params": {
+        "time": 16,
+        "mode": 0
+      }
+    },
+    {
+      "id": 17,
+      "type": "scope",
+      "x": 2240,
+      "y": 1120,
+      "params": {
+        "time": 500,
+        "mode": 0
+      }
     }
   ],
   "cables": [
@@ -579,6 +609,46 @@
         "module": 7,
         "port": "p1"
       }
+    },
+    {
+      "from": {
+        "module": 12,
+        "port": "lp24"
+      },
+      "to": {
+        "module": 15,
+        "port": "a"
+      }
+    },
+    {
+      "from": {
+        "module": 14,
+        "port": "out"
+      },
+      "to": {
+        "module": 16,
+        "port": "a"
+      }
+    },
+    {
+      "from": {
+        "module": 1,
+        "port": "out"
+      },
+      "to": {
+        "module": 17,
+        "port": "a"
+      }
+    },
+    {
+      "from": {
+        "module": 8,
+        "port": "out"
+      },
+      "to": {
+        "module": 17,
+        "port": "b"
+      }
     }
   ],
   "inputs": [
@@ -604,7 +674,8 @@
     {
       "module": 5,
       "param": "voices",
-      "label": "voices"
+      "label": "voices",
+      "head": "voice"
     },
     {
       "module": 5,
@@ -612,14 +683,20 @@
       "label": "unison"
     },
     {
+      "module": 6,
+      "param": "time",
+      "label": "glide"
+    },
+    {
       "module": 8,
       "param": "wave",
-      "label": "A wave"
+      "label": "wave",
+      "head": "osc A"
     },
     {
       "module": 8,
       "param": "pw",
-      "label": "A pw"
+      "label": "pw"
     },
     {
       "module": 10,
@@ -629,22 +706,25 @@
     {
       "module": 7,
       "param": "wave",
-      "label": "B wave"
+      "label": "wave",
+      "head": "osc B"
     },
     {
       "module": 7,
       "param": "coarse",
-      "label": "B freq"
+      "label": "freq"
     },
     {
       "module": 7,
       "param": "fine",
-      "label": "B fine"
+      "label": "fine"
     },
     {
       "module": 8,
       "param": "level",
-      "label": "A level"
+      "label": "A level",
+      "col": true,
+      "head": "mixer"
     },
     {
       "module": 7,
@@ -659,7 +739,8 @@
     {
       "module": 12,
       "param": "cutoff",
-      "label": "cutoff"
+      "label": "cutoff",
+      "head": "filter"
     },
     {
       "module": 12,
@@ -678,48 +759,71 @@
     },
     {
       "module": 11,
+      "param": "view",
+      "label": "filter env"
+    },
+    {
+      "module": 11,
       "param": "a",
-      "label": "filter a"
+      "label": "a"
     },
     {
       "module": 11,
       "param": "d",
-      "label": "filter d"
+      "label": "d"
     },
     {
       "module": 11,
       "param": "s",
-      "label": "filter s"
+      "label": "s"
     },
     {
       "module": 11,
       "param": "r",
-      "label": "filter r"
+      "label": "r"
+    },
+    {
+      "module": 15,
+      "param": "view",
+      "label": "filter"
+    },
+    {
+      "module": 13,
+      "param": "view",
+      "label": "amp env",
+      "col": true,
+      "head": "amp"
     },
     {
       "module": 13,
       "param": "a",
-      "label": "amp a"
+      "label": "a"
     },
     {
       "module": 13,
       "param": "d",
-      "label": "amp d"
+      "label": "d"
     },
     {
       "module": 13,
       "param": "s",
-      "label": "amp s"
+      "label": "s"
     },
     {
       "module": 13,
       "param": "r",
-      "label": "amp r"
+      "label": "r"
+    },
+    {
+      "module": 16,
+      "param": "view",
+      "label": "out"
     },
     {
       "module": 9,
       "param": "gain",
-      "label": "pmod env→A"
+      "label": "pmod env→A",
+      "head": "mod"
     },
     {
       "module": 8,
@@ -742,9 +846,9 @@
       "label": "vibrato"
     },
     {
-      "module": 6,
-      "param": "time",
-      "label": "glide"
+      "module": 17,
+      "param": "view",
+      "label": "lfo / osc A"
     }
   ],
   "children": [
@@ -797,9 +901,24 @@
           "module": 14,
           "port": "out",
           "label": "out"
+        },
+        {
+          "module": 12,
+          "port": "lp24",
+          "label": "filter"
+        },
+        {
+          "module": 8,
+          "port": "out",
+          "label": "osc A"
         }
       ],
       "params": [
+        {
+          "module": 6,
+          "param": "time",
+          "label": "glide"
+        },
         {
           "module": 8,
           "param": "wave",
@@ -862,6 +981,11 @@
         },
         {
           "module": 11,
+          "param": "view",
+          "label": "filter env"
+        },
+        {
+          "module": 11,
           "param": "a",
           "label": "filter a"
         },
@@ -879,6 +1003,11 @@
           "module": 11,
           "param": "r",
           "label": "filter r"
+        },
+        {
+          "module": 13,
+          "param": "view",
+          "label": "amp env"
         },
         {
           "module": 13,
@@ -909,11 +1038,6 @@
           "module": 8,
           "param": "pm",
           "label": "pmod B→A"
-        },
-        {
-          "module": 6,
-          "param": "time",
-          "label": "glide"
         },
         {
           "module": 8,

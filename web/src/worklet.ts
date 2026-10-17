@@ -3,6 +3,7 @@
 import { Engine } from './engine';
 import { Arp, type ArpCfg } from './arp';
 import type { Patch } from './patch';
+import { ViewStream, type ViewData } from './scope-stream';
 
 declare const sampleRate: number;
 declare class AudioWorkletProcessor {
@@ -23,6 +24,12 @@ export type HostMsg =
   | { t: 'unprobe'; key: string }
   | { t: 'watch'; key: string; id: number; port: string }
   | { t: 'unwatch'; key: string }
+  /** a Scope module's screen: per input the outputs cabled into it (summed), and its window in samples */
+  | { t: 'view'; key: string; chans: { id: number; port: string }[][]; samples: number }
+  | { t: 'unview'; key: string }
+  /** an envelope display: its copies' stage and level (Engine.envStates), sent with the probes */
+  | { t: 'envwatch'; key: string; id: number }
+  | { t: 'unenvwatch'; key: string }
   | { t: 'on'; note: number; vel: number }
   | { t: 'off'; note: number }
   | { t: 'clock' }
@@ -50,6 +57,11 @@ class ModularProcessor extends AudioWorkletProcessor {
   /** outputs patched into the editor's sidebar sliders (Patch.slackFrom, zoomFrom) by key: their mean over two blocks, sent
    * about 170 times a second */
   private watched = new Map<string, { id: number; port: string; sum: number; n: number }>();
+  /** Scope screens on show: their inputs' histories (scope-stream.ts), sent with the probes */
+  private views = new Map<string, { chans: { id: number; port: string }[][]; samples: number; streams: ViewStream[] }>();
+  private viewSum = new Float32Array(128);
+  /** envelope displays on show: module id by key */
+  private envs = new Map<string, number>();
   constructor() {
     super();
     this.port.onmessage = (ev: MessageEvent<HostMsg>) => {
@@ -59,6 +71,7 @@ class ModularProcessor extends AudioWorkletProcessor {
           this.arp.clear(this.engine);
           this.engine.load(m.patch);
           for (const p of this.probes.values()) { p.ring.fill(0); p.w = 0; }
+          for (const v of this.views.values()) v.streams = v.chans.map(() => new ViewStream(v.samples));
           this.probeBlocks = 0;
           this.revision = m.revision ?? 0;
           this.failed = false;
@@ -72,6 +85,10 @@ class ModularProcessor extends AudioWorkletProcessor {
         else if (m.t === 'unprobe') this.probes.delete(m.key);
         else if (m.t === 'watch') this.watched.set(m.key, { id: m.id, port: m.port, sum: 0, n: 0 });
         else if (m.t === 'unwatch') this.watched.delete(m.key);
+        else if (m.t === 'view') this.views.set(m.key, { chans: m.chans, samples: m.samples, streams: m.chans.map(() => new ViewStream(m.samples)) });
+        else if (m.t === 'unview') this.views.delete(m.key);
+        else if (m.t === 'envwatch') this.envs.set(m.key, m.id);
+        else if (m.t === 'unenvwatch') this.envs.delete(m.key);
         else if (m.t === 'arp') this.arp.set(m.cfg);
         else if (m.t === 'arpplay') {
           this.arp.play = m.on;
@@ -110,6 +127,28 @@ class ModularProcessor extends AudioWorkletProcessor {
       data.set(p.ring.subarray(0, p.w), PROBE_LEN - p.w);
       this.port.postMessage({ probe: key, data, sr: sampleRate, revision: this.revision }, [data.buffer]);
     }
+    for (const [key, v] of this.views) {
+      const chans: ViewData[] = v.streams.map((s) => s.data());
+      const bufs = chans.flatMap((c) => ('raw' in c ? [c.raw.buffer] : [c.min.buffer, c.max.buffer]));
+      this.port.postMessage({ view: key, chans, sr: sampleRate }, bufs);
+    }
+    for (const [key, id] of this.envs) this.port.postMessage({ env: key, states: this.engine.envStates(id) });
+  }
+
+  /** each Scope input: the sum of what is cabled into it (as Engine.probe sees each output) */
+  private feedViews(n: number): void {
+    if (this.viewSum.length < n) this.viewSum = new Float32Array(n);
+    const sum = this.viewSum;
+    for (const v of this.views.values())
+      v.chans.forEach((srcs, i) => {
+        if (srcs.length === 1) return v.streams[i].push(this.engine.probe(srcs[0].id, srcs[0].port), n);
+        sum.fill(0, 0, n);
+        for (const s of srcs) {
+          const b = this.engine.probe(s.id, s.port);
+          if (b) for (let k = 0; k < n; k++) sum[k] += b[k];
+        }
+        v.streams[i].push(srcs.length ? sum : null, n);
+      });
   }
 
   private feedWatch(n: number): void {
@@ -129,7 +168,8 @@ class ModularProcessor extends AudioWorkletProcessor {
     try {
       this.arp.run(out[0].length, this.engine);
       this.engine.render(out[0], out[1] ?? out[0]);
-      if (this.probes.size) this.feedProbes(out[0].length, out);
+      if (this.views.size) this.feedViews(out[0].length);
+      if (this.probes.size || this.views.size || this.envs.size) this.feedProbes(out[0].length, out);
       if (this.watched.size) this.feedWatch(out[0].length);
       if (this.valuesRequested) {
         this.valuesRequested = false;

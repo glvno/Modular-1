@@ -33,6 +33,14 @@ import {
   overlapping,
   tileMembers,
   validateAssemblyDef,
+  demote,
+  keepParams,
+  moveParam,
+  moveRef,
+  paramColumns,
+  setColumnBreak,
+  setHeading,
+  type ParamRef,
 } from './assembly';
 import { CATEGORIES, categoryOf, FACTORY } from './assemblies';
 import { newPatch } from './patch';
@@ -573,5 +581,91 @@ describe('assembly layout metadata', () => {
     fixAssemblies(restored, DEFS);
     expect(restored.assemblies?.[0].size).toBeUndefined();
     expect(restored.assemblies?.[0].frameSize).toEqual({ width: 4000, height: 80 });
+  });
+});
+
+describe('assembly card columns and headings', () => {
+  const rows = (...xs: (string | [string, { col?: true; head?: string }])[]): ParamRef[] =>
+    xs.map((x, i) => (typeof x === 'string' ? { module: i + 1, param: x, label: x } : { module: i + 1, param: x[0], label: x[0], ...x[1] }));
+  const show = (list: ParamRef[]): string[] => list.map((r) => `${r.col ? '| ' : ''}${r.head ? `[${r.head}] ` : ''}${r.label}`);
+
+  it('splits the rows into columns at the breaks', () => {
+    expect(paramColumns(rows('a', 'b', ['c', { col: true }], 'd', ['e', { col: true }]))).toEqual([[0, 1], [2, 3], [4]]);
+    expect(paramColumns([])).toEqual([[]]);
+  });
+
+  it('a removed row hands its break and heading to the next row; the nearer heading wins; none after it, they go', () => {
+    const list = rows(['a', { head: 'A' }], ['b', { col: true, head: 'B' }], 'c', ['d', { head: 'D' }], ['e', { col: true }]);
+    expect(show(keepParams(list, (r) => r.label !== 'b'))).toEqual(['[A] a', '| [B] c', '[D] d', '| e']);
+    expect(show(keepParams(list, (r) => r.label !== 'c'))).toEqual(['[A] a', '| [B] b', '[D] d', '| e']);
+    expect(show(keepParams(list, (r) => r.label !== 'e'))).toEqual(['[A] a', '| [B] b', 'c', '[D] d']);
+    expect(show(keepParams(list, (r) => r.label !== 'a'))).toEqual(['[B] b', 'c', '[D] d', '| e']); // no break on the first row
+  });
+
+  it('moves a row: before a row takes over its place (under its heading), after joins its section', () => {
+    const list = rows(['a', { head: 'A' }], 'b', ['c', { col: true, head: 'C' }], 'd');
+    expect(show(moveParam(list, 3, 0, false))).toEqual(['[A] d', 'a', 'b', '| [C] c']);
+    expect(show(moveParam(list, 0, 1, true))).toEqual(['[A] b', 'a', '| [C] c', 'd']);
+    expect(show(moveParam(list, 2, 1, true))).toEqual(['[A] a', 'b', 'c', '| [C] d']);
+    expect(show(moveParam(list, 2, 3, true))).toEqual(['[A] a', 'b', '| [C] d', 'c']);
+    expect(show(moveParam(list, 1, 3, true))).toEqual(['[A] a', '| [C] c', 'd', 'b']);
+    expect(moveParam(list, 1, 1, false)).toBe(list);
+  });
+
+  it('sets and clears breaks and headings; never a break on the first row', () => {
+    const list = rows('a', 'b');
+    setColumnBreak(list, 0, true);
+    setColumnBreak(list, 1, true);
+    setHeading(list, 0, '  osc  ');
+    expect(show(list)).toEqual(['[osc] a', '| b']);
+    setHeading(list, 0, ' ');
+    setColumnBreak(list, 1, false);
+    expect(show(list)).toEqual(['a', 'b']);
+    expect(moveRef(['x', 'y', 'z'], 0, 2, true)).toEqual(['y', 'z', 'x']);
+    expect(moveRef(['x', 'y', 'z'], 2, 0, false)).toEqual(['z', 'x', 'y']);
+  });
+
+  it('demoting a row keeps its column; the layout survives save, load and insert, and leaves the binary alone', () => {
+    const { p, osc, env, vca } = voice();
+    const a = makeAssembly(p, [osc, env, vca], 'voice');
+    for (const q of ['a', 'd', 's', 'r']) promote(a, env, q);
+    promote(a, vca, 'gain');
+    const before = encodePatch(p);
+    setHeading(a.params, 0, 'env');
+    setColumnBreak(a.params, 4, true);
+    setHeading(a.params, 4, 'amp');
+    expect(encodePatch(p)).toEqual(before);
+    const def = validateAssemblyDef(JSON.parse(JSON.stringify(toDef(p, a))), DEFS);
+    expect(show(def.params)).toEqual(['[env] a', 'd', 's', 'r', '| [amp] gain']);
+    const next = emptyPatch();
+    const b = insertAssembly(next, DEFS, def, 0, 0);
+    expect(show(b.params)).toEqual(show(def.params));
+    const loaded = validatePatch(JSON.parse(JSON.stringify(next)), DEFS);
+    fixAssemblies(loaded, DEFS);
+    expect(show(loaded.assemblies![0].params)).toEqual(show(def.params));
+    demote(a, env, 'a');
+    expect(show(a.params)).toEqual(['[env] d', 's', 'r', '| [amp] gain']);
+    removeModule(p, vca);
+    reconcileAll(p, DEFS);
+    expect(show(a.params)).toEqual(['[env] d', 's', 'r']);
+  });
+
+  it('drops malformed layout fields on load', () => {
+    const def = JSON.parse(JSON.stringify(FACTORY.find((d) => d.name === 'prophet 5')!));
+    def.params[0].col = true;
+    def.params[1].col = 'yes';
+    def.params[2].head = 42;
+    def.params[3].head = 'x'.repeat(100);
+    const d = validateAssemblyDef(def, DEFS);
+    expect(d.params[0].col).toBeUndefined();
+    expect(d.params[1].col).toBeUndefined();
+    expect(d.params[2].head).toBeUndefined();
+    expect(d.params[3].head).toHaveLength(40);
+  });
+
+  it('the factory Prophet 5 has three sectioned columns', () => {
+    const d = FACTORY.find((x) => x.name === 'prophet 5')!;
+    expect(paramColumns(d.params).map((c) => c.length)).toEqual([9, 13, 12]);
+    expect(d.params.filter((r) => r.head).map((r) => r.head)).toEqual(['voice', 'osc A', 'osc B', 'mixer', 'filter', 'amp', 'mod']);
   });
 });

@@ -34,6 +34,7 @@ import {
   polyCfg,
   sameEnd,
   SHARED_TYPES,
+  EDITOR_ONLY,
   type Cable,
   type ModuleDef,
   type ModuleInst,
@@ -126,7 +127,10 @@ export interface DeviceGroup {
  * left out). Group order: the poly assemblies in
  * overlay order, then the allocators' own groups.
  */
-export function deviceView(p: Patch): { patch: Patch; groups: DeviceGroup[] } {
+export function deviceView(source: Patch): { patch: Patch; groups: DeviceGroup[] } {
+  // editor-only modules (the Scope) and their cables are not part of the sound
+  const shown = new Set(source.modules.filter((m) => EDITOR_ONLY.has(m.type)).map((m) => m.id));
+  const p = shown.size ? { ...source, modules: source.modules.filter((m) => !shown.has(m.id)), cables: source.cables.filter((c) => !shown.has(c.from.module) && !shown.has(c.to.module)) } : source;
   const groups = polyGroups(p);
   const out: DeviceGroup[] = groups.map((g) => ({ key: `${g.asm.id}:${g.cfg.parts}`, cfg: g.cfg, modules: new Set(g.modules) }));
   const modules = p.modules.map((m) => m);

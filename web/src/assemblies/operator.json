@@ -145,7 +145,8 @@
     {
       "module": 1,
       "param": "coarse",
-      "label": "ratio"
+      "label": "ratio",
+      "head": "oscillator"
     },
     {
       "module": 1,
@@ -170,7 +171,8 @@
     {
       "module": 2,
       "param": "l1",
-      "label": "l1"
+      "label": "l1",
+      "head": "envelope"
     },
     {
       "module": 2,

@@ -135,7 +135,7 @@ describe('engine', () => {
   it('every module but fm1 and output has the two parameter inputs and a matrix', () => {
     for (const d of Object.values(DEFS)) {
       const has = d.inputs.filter((i) => i.pin).map((i) => i.name);
-      if (['fm1', 'output', 'alloc'].includes(d.type) || !d.params.length) expect(has, d.type).toEqual([]); // nothing to modulate (the Part); the allocator's settings are structure
+      if (['fm1', 'output', 'alloc', 'scope'].includes(d.type) || !d.params.length) expect(has, d.type).toEqual([]); // nothing to modulate (the Part); the allocator's settings are structure; the Scope's are its display
       else expect(has, d.type).toEqual(['p1', 'p2']);
       const m = addModule(emptyPatch(), d, 0, 0);
       expect(!!m.map, d.type).toBe(!!d.paramInputs);
@@ -1222,6 +1222,35 @@ describe('polyphony', () => {
     const b = mono(67);
     for (let i = 0; i < both.length; i += 7) expect(both[i]).toBeCloseTo(a[i] + b[i], 5);
     expect(rms(both)).toBeGreaterThan(rms(a));
+  });
+
+  it('a scope probe on a per-part output: audio is the sum over the parts, control the newest held part', () => {
+    const build = (): Patch => {
+      const p = emptyPatch();
+      const kb = addModule(p, DEFS.fm1, 0, 0);
+      const o = addModule(p, DEFS.osc, 0, 0);
+      const out = addModule(p, DEFS.output, 0, 0);
+      connect(p, DEFS, { module: kb.id, port: 'pitch' }, { module: o.id, port: 'pitch' });
+      connect(p, DEFS, { module: o.id, port: 'out' }, { module: out.id, port: 'l' });
+      return p;
+    };
+    const osc = build().modules.find((m) => m.type === 'osc')!.id;
+    const probed = (q: Patch, notes: number[], id: number, port: string): Float32Array => {
+      const e = new Engine(SR);
+      e.load(q);
+      for (const k of notes) e.noteOn(k);
+      render(e, 512);
+      return Float32Array.from(e.probe(id, port)!);
+    };
+    const poly = withParts(build(), 2);
+    const both = probed(poly, [60, 67], osc, 'out');
+    const a = probed(build(), [60], osc, 'out');
+    const b = probed(build(), [67], osc, 'out');
+    for (let i = 0; i < both.length; i++) expect(both[i]).toBeCloseTo(a[i] + b[i], 5);
+    expect(rms(both)).toBeGreaterThan(rms(a));
+    const alloc = poly.modules.find((m) => m.type === 'alloc')!.id;
+    expect(probed(poly, [60, 67], alloc, 'pitch')).toEqual(probed(poly, [67], alloc, 'pitch'));
+    expect(probed(poly, [60, 67], alloc, 'pitch')).not.toEqual(probed(poly, [60], alloc, 'pitch'));
   });
 
   it('assign reuse: a free part first (the one that played the key, else the longest free), then the oldest is taken over; note off frees', () => {

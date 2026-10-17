@@ -4,7 +4,7 @@
 // `voice` and `echo` are kept as files. Run from web/:  npx vite-node scripts/gen-assemblies.ts
 import { writeFileSync } from 'node:fs';
 import { DEFS } from '../src/modules';
-import { defaultMap, defaultParams, type ModuleInst, type PolyCards, type Source } from '../src/patch';
+import { defaultMap, defaultParams, rowDef, type ModuleInst, type PolyCards, type Source } from '../src/patch';
 import { pinsToParams, type AssemblyDef, type NestedDef, type PortRef, type ParamRef } from '../src/assembly';
 
 const OUT = new URL('../src/assemblies/', import.meta.url);
@@ -17,12 +17,16 @@ interface B {
   wire(a: number, ap: string, b: number, bp: string): void;
   input(label: string, module: number, port: string, ...also: [number, string][]): void;
   output(label: string, module: number, port: string): void;
-  param(label: string, module: number, param: string): void;
+  /** `col`: a new column of the card starts here; `head`: a heading above it; `inner`: the label on a nested card (which
+   * has no headings), when it differs */
+  param(label: string, module: number, param: string, o?: { col?: boolean; head?: string; inner?: string }): void;
   /** a nested assembly (collapsed) of these modules at grid column / row; a top-level port or parameter of one of its
    * modules is shown on it too (a parent only shows what its children show) */
   nest(name: string, col: number, row: number, members: number[], poly?: PolyCards): void;
   /** an input of a nested assembly only (fed from inside the top level) */
   nestInput(label: string, module: number, port: string, ...also: [number, string][]): void;
+  /** an output of a nested assembly only (read inside the top level, e.g. by a scope) */
+  nestOutput(label: string, module: number, port: string): void;
 }
 
 function build(name: string, category: string, f: (b: B) => void, poly?: PolyCards): AssemblyDef {
@@ -74,15 +78,21 @@ function build(name: string, category: string, f: (b: B) => void, poly?: PolyCar
       outputs.push({ module, port, label });
       nestOf(module)?.outputs.push({ module, port, label });
     },
-    param(label, module, param) {
+    param(label, module, param, o = {}) {
       const m = modules[module - 1];
-      if (!m || !DEFS[m.type].params.some((q) => q.name === param)) throw new Error(`${name}: no parameter ${param} on module ${module}`);
-      params.push({ module, param, label });
-      nestOf(module)?.params.push({ module, param, label });
+      if (!m || !rowDef(DEFS[m.type], param)) throw new Error(`${name}: no parameter ${param} on module ${module}`);
+      params.push({ module, param, label, ...(o.col && params.length ? { col: true as const } : {}), ...(o.head ? { head: o.head } : {}) });
+      nestOf(module)?.params.push({ module, param, label: o.inner ?? label });
     },
     nest(label, col, row, members, poly) {
       for (const m of members) if (!modules[m - 1] || nestOf(m)) throw new Error(`${name}: module ${m} cannot join ${label}`);
       nested.push({ id: nested.length + 1, name: label, label, x: col * GX, y: row * GY, open: false, modules: members, inputs: [], outputs: [], params: [], ...(poly ? { poly: { ...poly } } : {}) });
+    },
+    nestOutput(label, module, port) {
+      check(module, port, 'outputs');
+      const n = nestOf(module);
+      if (!n) throw new Error(`${name}: ${label} is not on a nested assembly`);
+      n.outputs.push({ module, port, label });
     },
     nestInput(label, module, port, ...also) {
       check(module, port, 'inputs');
@@ -119,12 +129,12 @@ asm('operator', 'Voices', (b) => {
   b.input('pm', osc, 'pm');
   b.input('level cv', vca, 'p1');
   b.output('out', vca, 'out');
-  b.param('ratio', osc, 'coarse');
+  b.param('ratio', osc, 'coarse', { head: 'oscillator' });
   b.param('detune', osc, 'fine');
   b.param('index', osc, 'pm');
   b.param('feedback', osc, 'fb');
   b.param('level', vca, 'gain');
-  for (const q of ['l1', 'r1', 'l2', 'r2', 'l3', 'r3', 'l4', 'r4']) b.param(q, env, q);
+  for (const q of ['l1', 'r1', 'l2', 'r2', 'l3', 'r3', 'l4', 'r4']) b.param(q, env, q, q === 'l1' ? { head: 'envelope' } : {});
 });
 
 // two operators: a modulator with its own envelope into the carrier's phase, the carrier with its envelope
@@ -674,6 +684,10 @@ asm('prophet 5', 'Voices', (b) => {
   const flt = b.add('ladder', 5, 0, { cutoff: 600, res: 0.2, cvamt: 3.5 });
   const aenv = b.add('adsr', 5, 1, { a: 0.01, d: 0.5, s: 0.8, r: 0.4 });
   const vca = b.add('vca', 6, 0, { gain: 0.6 });
+  // scopes on the card: the filter envelope against the filter, the voices summed, the LFO against oscillator A
+  const fScope = b.add('scope', 7, 0, { time: 16 });
+  const aScope = b.add('scope', 7, 1, { time: 16 });
+  const mScope = b.add('scope', 7, 2, { time: 500 });
   b.nest('voice', 1, 1, [gl, oscB, oscA, polyEnv, sync, fenv, flt, aenv, vca], {
     flaws: [{ detune: 3, drift: 20, bright: 1, env: 4, level: 100 }, { detune: -4, drift: 25, bright: -1, env: -5, level: 97 }, { detune: 1, drift: 15, bright: 0, env: 6, level: 100 }, { detune: -2, drift: 20, bright: 2, env: -3, level: 95 }, { detune: 5, drift: 30, bright: -2, env: 2, level: 98 }],
   });
@@ -699,6 +713,10 @@ asm('prophet 5', 'Voices', (b) => {
   b.wire(wheel, 'out', vib, 'in');
   b.wire(vib, 'out', oscA, 'p1');
   b.wire(vib, 'out', oscB, 'p1');
+  b.wire(flt, 'lp24', fScope, 'a');
+  b.wire(vca, 'out', aScope, 'a');
+  b.wire(lfo, 'out', mScope, 'a');
+  b.wire(oscA, 'out', mScope, 'b');
   b.input('keys', part, 'keys');
   b.input('wheel', wheel, 'cv');
   b.nestInput('pitch', gl, 'in');
@@ -706,29 +724,37 @@ asm('prophet 5', 'Voices', (b) => {
   b.nestInput('noise', flt, 'in');
   b.nestInput('vibrato', oscA, 'p1', [oscB, 'p1']);
   b.output('out', vca, 'out');
-  b.param('voices', part, 'voices');
+  b.nestOutput('filter', flt, 'lp24');
+  b.nestOutput('osc A', oscA, 'out');
+  // three columns, sectioned like the original's panel
+  b.param('voices', part, 'voices', { head: 'voice' });
   b.param('unison', part, 'unison');
-  b.param('A wave', oscA, 'wave');
-  b.param('A pw', oscA, 'pw');
+  b.param('glide', gl, 'time');
+  b.param('wave', oscA, 'wave', { head: 'osc A', inner: 'A wave' });
+  b.param('pw', oscA, 'pw', { inner: 'A pw' });
   b.param('sync', sync, 'gain');
-  b.param('B wave', oscB, 'wave');
-  b.param('B freq', oscB, 'coarse');
-  b.param('B fine', oscB, 'fine');
-  b.param('A level', oscA, 'level');
+  b.param('wave', oscB, 'wave', { head: 'osc B', inner: 'B wave' });
+  b.param('freq', oscB, 'coarse', { inner: 'B freq' });
+  b.param('fine', oscB, 'fine', { inner: 'B fine' });
+  b.param('A level', oscA, 'level', { col: true, head: 'mixer' });
   b.param('B level', oscB, 'level');
   b.param('noise', nz, 'level');
-  b.param('cutoff', flt, 'cutoff');
+  b.param('cutoff', flt, 'cutoff', { head: 'filter' });
   b.param('res', flt, 'res');
   b.param('env amt', flt, 'cvamt');
   b.param('kbd track', flt, 'track');
-  for (const q of ['a', 'd', 's', 'r']) b.param(`filter ${q}`, fenv, q);
-  for (const q of ['a', 'd', 's', 'r']) b.param(`amp ${q}`, aenv, q);
-  b.param('pmod env→A', polyEnv, 'gain');
+  b.param('filter env', fenv, 'view');
+  for (const q of ['a', 'd', 's', 'r']) b.param(q, fenv, q, { inner: `filter ${q}` });
+  b.param('filter', fScope, 'view');
+  b.param('amp env', aenv, 'view', { col: true, head: 'amp' });
+  for (const q of ['a', 'd', 's', 'r']) b.param(q, aenv, q, { inner: `amp ${q}` });
+  b.param('out', aScope, 'view');
+  b.param('pmod env→A', polyEnv, 'gain', { head: 'mod' });
   b.param('pmod B→A', oscA, 'pm');
   b.param('lfo rate', lfo, 'rate');
   b.param('lfo wave', lfo, 'wave');
   b.param('vibrato', vib, 'gain');
-  b.param('glide', gl, 'time');
+  b.param('lfo / osc A', mScope, 'view');
 });
 
 // an LFO through a Scale: vibrato (into a pitch input), tremolo (into a VCA's cv with an offset), a filter sweep
@@ -754,12 +780,12 @@ asm('step sequencer', 'Utilities', (b) => {
   b.input('reset', sq, 'reset', [clk, 'reset']);
   b.output('pitch', qn, 'out');
   b.output('gate', sq, 'gate');
-  b.param('tempo', clk, 'rate');
+  b.param('tempo', clk, 'rate', { head: 'sequence' });
   b.param('length', sq, 'len');
   b.param('direction', sq, 'dir');
   b.param('scale', qn, 'scale');
   b.param('root', qn, 'root');
-  for (const q of ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']) b.param(q, sq, q);
+  for (const q of ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8']) b.param(q, sq, q, q === 's1' ? { head: 'steps' } : {});
 });
 
 // a random melody: clocked sample & hold on noise, quantized; a pulse makes the gate

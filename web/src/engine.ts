@@ -217,10 +217,44 @@ export class Engine {
     return this.morphT;
   }
 
-  /** the buffer an output wrote in the last block (part 0 of a per-part module), for a scope probe */
+  /**
+   * The buffer an output wrote in the last block, for a scope probe (and a sidebar watch). A module that runs once per
+   * part: an audio output is the sum over the parts (what a cable from it carries, what is heard), a control / gate
+   * output the newest held part's (the part the parameter displays follow; a sum of pitches or gates means nothing).
+   */
   probe(id: number, port: string): Float32Array | null {
-    return this.nodes.get(id)?.inst[0]?.out[port] ?? null;
+    const node = this.nodes.get(id);
+    if (!node) return null;
+    if (node.group < 0 || node.inst.length < 2) return node.inst[0]?.out[port] ?? null;
+    if (node.impl.def.outputs.find((o) => o.name === port)?.kind !== 'audio')
+      return node.inst[this.shownPart(this.groups[node.group])]?.out[port] ?? null;
+    const sum = (this.probeSums[`${id}:${port}`] ??= new Float32Array(BLOCK));
+    sum.fill(0);
+    for (const inst of node.inst) {
+      const b = inst.out[port];
+      if (b) for (let i = 0; i < BLOCK; i++) sum[i] += b[i];
+    }
+    return sum;
   }
+  /**
+   * An envelope's copies as they run, for its display (env-view.ts): stage and level of each copy (one per voice inside
+   * a poly assembly) and which is the newest held one; null when the module has no stage state.
+   */
+  envStates(id: number): { stage: number; v: number; newest: boolean }[] | null {
+    const node = this.nodes.get(id);
+    if (!node) return null;
+    const newest = node.group >= 0 && node.inst.length > 1 ? this.shownPart(this.groups[node.group]) : 0;
+    const out: { stage: number; v: number; newest: boolean }[] = [];
+    for (const [i, inst] of node.inst.entries()) {
+      const s = inst.state as { stage?: unknown; v?: unknown } | null;
+      if (typeof s?.stage !== 'number' || typeof s.v !== 'number') return null;
+      out.push({ stage: s.stage, v: s.v, newest: i === newest });
+    }
+    return out;
+  }
+
+  /** the probes' sums over the parts, one buffer per probed output */
+  private probeSums: Record<string, Float32Array> = {};
 
   /** the part of a group whose values a display shows: the newest held one, else the newest released */
   private shownPart(g: Group): number {

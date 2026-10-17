@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { CPU, cpuEstimate } from './cpu';
 import { BUSY_TYPES, cpuChecks } from './cpu-checks';
 import { DEFS } from './modules';
+import { EDITOR_ONLY } from './patch';
 import { PRESETS } from './presets';
 import { withParts } from './test-poly';
 
 describe('CPU estimate', () => {
   it('has a cost for every module type (npm run cpu-costs after adding one)', () => {
-    expect(Object.keys(CPU.types).sort()).toEqual(Object.keys(DEFS).sort());
+    expect(Object.keys(CPU.types).sort()).toEqual(Object.keys(DEFS).filter((t) => !EDITOR_ONLY.has(t)).sort()); // the Scope never runs
   });
 
   const checks = cpuChecks(CPU.note);

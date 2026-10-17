@@ -4,6 +4,7 @@ import type { Patch } from './patch';
 import { ARP_DEFAULT } from './arp';
 import type { HostMsg } from './worklet';
 import type { ParameterValues } from './engine';
+import type { ViewData } from './scope-stream';
 
 export class AudioHost {
   private ctx: AudioContext | null = null;
@@ -30,6 +31,10 @@ export class AudioHost {
   onProbe: (key: string, data: Float32Array, sr: number) => void = () => {};
   /** a watched output's mean over the last two blocks (a sidebar slider's source, by key) */
   onWatch: (key: string, v: number) => void = () => {};
+  /** a Scope screen's latest histories, one per input (scope-stream.ts) */
+  onView: (key: string, chans: ViewData[], sr: number) => void = () => {};
+  /** an envelope display's copies (Engine.envStates) */
+  onEnv: (key: string, states: { stage: number; v: number; newest: boolean }[] | null) => void = () => {};
 
   get running(): boolean {
     return this.ctx?.state === 'running';
@@ -59,6 +64,10 @@ export class AudioHost {
           this.latestValues = null; this.onValues(null); this.onError(ev.data.error);
         } else if (typeof ev.data?.watch === 'string') {
           this.onWatch(ev.data.watch, ev.data.v);
+        } else if (typeof ev.data?.env === 'string') {
+          this.onEnv(ev.data.env, ev.data.states);
+        } else if (typeof ev.data?.view === 'string') {
+          this.onView(ev.data.view, ev.data.chans, ev.data.sr);
         } else if (ev.data?.probe) {
           if (ev.data.revision === this.revision) this.onProbe(ev.data.probe, ev.data.data, ev.data.sr);
         }
@@ -125,8 +134,8 @@ export class AudioHost {
   private watches = new Map<string, HostMsg>();
 
   send(msg: HostMsg): void {
-    if (msg.t === 'watch') this.watches.set(msg.key, msg);
-    else if (msg.t === 'unwatch') this.watches.delete(msg.key);
+    if (msg.t === 'watch' || msg.t === 'view' || msg.t === 'envwatch') this.watches.set(msg.key, msg);
+    else if (msg.t === 'unwatch' || msg.t === 'unview' || msg.t === 'unenvwatch') this.watches.delete(msg.key);
     if (this.node) this.node.port.postMessage(msg);
     else if (this.ctx && !['patch', 'arp'].includes(msg.t)) this.early.push(msg);
   }

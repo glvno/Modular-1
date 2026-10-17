@@ -505,6 +505,7 @@ const adsr: ModuleImpl<AdsrState> = {
       param('s', 0, 1, 0.6, { step: 0.01 }),
       param('r', 0.001, 8, 0.3, { unit: 's', step: 0.001, log: true }),
     ],
+    views: [param('view', 0, 0, 0, { screen: true })],
   },
   init: () => ({ stage: 0, v: 0, prev: 0 }),
   process(c, s) {
@@ -1445,6 +1446,7 @@ const env: ModuleImpl<EnvState> = {
       param('l4', 0, 1, 0, { step: 0.01 }),
       param('r4', 0.001, 10, 0.5, { unit: 's', step: 0.001, log: true }),
     ],
+    views: [param('view', 0, 0, 0, { screen: true })],
   },
   init: () => ({ stage: 0, v: 0, prev: 0, t: 0 }),
   process(c, s) {
@@ -2162,7 +2164,33 @@ const alloc: ModuleImpl<null> = {
   process: (c) => part.process(c, null),
 };
 
-const ALL = [fm1, osc, lfo, noise, constant, scale, adsr, vca, filter, mixer, delay, reverb, output, glide, shape, env, string, wavetable, chorus, seq, clkdiv, sh, quant, pulse, pan, xfade, vowel, phaser, crush, ladder, dyn, math, logic, grain, comb, modal, shift, part, random, alloc];
+export const SCOPE_MODES = ['time', 'spectrum'];
+/** the shortest / longest window of a Scope (ms) */
+export const SCOPE_TIME_MIN = 1;
+export const SCOPE_TIME_MAX = 2000;
+/**
+ * Scope: an editor-only display. It draws what is cabled into `a` and `b` (as a probe sees it: a per-voice audio signal
+ * summed over the voices, a control signal from the newest held voice); `view` is its screen, which goes on an assembly
+ * card like a parameter. It has no outputs; the engines and the FM-1 never see it (poly.ts deviceView drops it, it has
+ * no type index: patchbin.ts TYPE_ORDER).
+ */
+const scope: ModuleImpl<null> = {
+  def: {
+    type: 'scope',
+    label: 'Scope',
+    inputs: [audio('a'), audio('b')],
+    outputs: [],
+    views: [param('view', 0, 0, 0, { screen: true })],
+    params: [
+      param('time', SCOPE_TIME_MIN, SCOPE_TIME_MAX, 16, { unit: 'ms', log: true, onScreen: true }),
+      param('mode', 0, 1, 0, { step: 1, choices: SCOPE_MODES, onScreen: true }),
+    ],
+  },
+  init: () => null,
+  process: () => {},
+};
+
+const ALL = [fm1, osc, lfo, noise, constant, scale, adsr, vca, filter, mixer, delay, reverb, output, glide, shape, env, string, wavetable, chorus, seq, clkdiv, sh, quant, pulse, pan, xfade, vowel, phaser, crush, ladder, dyn, math, logic, grain, comb, modal, shift, part, random, alloc, scope];
 
 /**
  * Every module except the FM-1 panel (the input) and the output has two parameter inputs, p1 and p2, each with an
@@ -2170,7 +2198,7 @@ const ALL = [fm1, osc, lfo, noise, constant, scale, adsr, vca, filter, mixer, de
  * effective value is its base + (block mean of p1 x att1 + block mean of p2 x att2, for the inputs that control it) x
  * (max - min), clamped.
  */
-export const PIN_EXEMPT = new Set(['fm1', 'output', 'alloc']);
+export const PIN_EXEMPT = new Set(['fm1', 'output', 'alloc', 'scope']);
 export const PIN_NAMES = ['p1', 'p2'] as const;
 for (const m of ALL)
   if (!PIN_EXEMPT.has(m.def.type) && m.def.params.length) {

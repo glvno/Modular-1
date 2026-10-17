@@ -23,6 +23,7 @@ import {
   type ModuleInst,
   type Patch,
   type PolyCards,
+  rowDef,
 } from './patch';
 import { isPin } from './parameter-routing';
 import { migrateParts, oscDrift, takeDrift } from './poly';
@@ -41,6 +42,115 @@ export interface ParamRef {
   module: number;
   param: string;
   label: string;
+  /** a new column of the collapsed card starts at this row (layout only, like the rest of the overlay) */
+  col?: true;
+  /** a heading above this row on the collapsed card */
+  head?: string;
+}
+
+/** the longest heading kept */
+const HEAD_MAX = 40;
+
+/** the layout fields of a promoted parameter from a file: a column break and a heading, each only when well formed */
+function rowLayout(r: Record<string, unknown>): Pick<ParamRef, 'col' | 'head'> {
+  const out: Pick<ParamRef, 'col' | 'head'> = {};
+  if (r.col === true) out.col = true;
+  const head = typeof r.head === 'string' ? r.head.trim().slice(0, HEAD_MAX) : '';
+  if (head) out.head = head;
+  return out;
+}
+
+/** a column break on the first row means nothing: drop it */
+function tidyRows(list: ParamRef[]): ParamRef[] {
+  if (list[0]?.col) {
+    const { col: _, ...rest } = list[0];
+    list[0] = rest;
+  }
+  return list;
+}
+
+/**
+ * The promoted parameters `keep` accepts. A column break or heading belongs to its place in the list, not to its row: a
+ * row that goes hands them to the next row that stays (whose own heading wins, being nearer); with no row after it they
+ * go too.
+ */
+export function keepParams(list: ParamRef[], keep: (r: ParamRef) => boolean): ParamRef[] {
+  const out: ParamRef[] = [];
+  let col = false;
+  let head: string | undefined;
+  for (const r of list) {
+    if (!keep(r)) {
+      col ||= !!r.col;
+      if (r.head) head = r.head;
+      continue;
+    }
+    if (col || head) {
+      const n: ParamRef = { ...r };
+      if (col) n.col = true;
+      if (head && !n.head) n.head = head;
+      out.push(n);
+      col = false;
+      head = undefined;
+    } else out.push(r);
+  }
+  return tidyRows(out);
+}
+
+/**
+ * Move the promoted parameter at `from` next to the one at `to`: before it, where it takes over that row's place (the
+ * top of a column or section stays the top: the moved row goes under the heading), or after it.
+ */
+export function moveParam(list: ParamRef[], from: number, to: number, after: boolean): ParamRef[] {
+  if (from === to || !list[from] || !list[to]) return list;
+  const moving = list[from];
+  const target = list[to];
+  const same = (a: ParamRef, b: ParamRef): boolean => a.module === b.module && a.param === b.param;
+  const rest = keepParams(list, (r) => r !== moving);
+  const i = rest.findIndex((r) => same(r, target));
+  const { col: _c, head: _h, ...plain } = moving;
+  if (after) rest.splice(i + 1, 0, plain);
+  else {
+    const { col, head, ...was } = rest[i];
+    rest.splice(i, 1, { ...plain, ...(col ? { col } : {}), ...(head ? { head } : {}) }, was);
+  }
+  return tidyRows(rest);
+}
+
+/** start a new column of the collapsed card at row `i` (not the first), or join it to the column before */
+export function setColumnBreak(list: ParamRef[], i: number, on: boolean): void {
+  const r = list[i];
+  if (!r) return;
+  if (on && i > 0) r.col = true;
+  else delete r.col;
+}
+
+/** the heading above row `i`; an empty text removes it */
+export function setHeading(list: ParamRef[], i: number, text: string): void {
+  const r = list[i];
+  if (!r) return;
+  const t = text.trim().slice(0, HEAD_MAX);
+  if (t) r.head = t;
+  else delete r.head;
+}
+
+/** the collapsed card's columns: the indices of the promoted parameters in each, split at the column breaks */
+export function paramColumns(list: ParamRef[]): number[][] {
+  const cols: number[][] = [[]];
+  list.forEach((r, i) => {
+    if (r.col && cols[cols.length - 1].length) cols.push([]);
+    cols[cols.length - 1].push(i);
+  });
+  return cols;
+}
+
+/** move an exposed jack before or after another of the same side */
+export function moveRef<T>(list: T[], from: number, to: number, after: boolean): T[] {
+  if (from === to || list[from] === undefined || list[to] === undefined) return list;
+  const moving = list[from];
+  const rest = list.filter((_, i) => i !== from);
+  const i = rest.indexOf(list[to]);
+  rest.splice(after ? i + 1 : i, 0, moving);
+  return rest;
 }
 
 export interface AssemblyLayout {
@@ -399,7 +509,7 @@ export function reconcile(p: Patch, a: AssemblyInst, defs?: Record<string, Modul
   const moduleOf = (id: number): ModuleInst | undefined => p.modules.find((m) => m.id === id);
   a.inputs = clean('in', pinsToParams(a.inputs, a.params, moduleOf));
   a.outputs = clean('out', a.outputs);
-  a.params = a.params.filter((r) => member.has(r.module) && (!defs || defs[typeOf(r.module)].params.some((q) => q.name === r.param)) && reachableParam(p, a, r.module, r.param));
+  a.params = keepParams(a.params, (r) => member.has(r.module) && (!defs || !rowDef(defs[typeOf(r.module)], r.param)?.onScreen && !!rowDef(defs[typeOf(r.module)], r.param)) && reachableParam(p, a, r.module, r.param));
   const b = boundary(p, members);
   for (const r of b.inputs) {
     // an outside cable into a routed pin shows on the sliders it feeds: promote those instead of exposing the pin
@@ -610,7 +720,7 @@ export function promote(a: AssemblyInst, module: number, param: string): void {
 }
 
 export function demote(a: AssemblyInst, module: number, param: string): void {
-  a.params = a.params.filter((r) => !(r.module === module && r.param === param));
+  a.params = keepParams(a.params, (r) => !(r.module === module && r.param === param));
 }
 
 /** move the collapsed card, every member and every nested assembly by (dx, dy) */
@@ -905,12 +1015,14 @@ export function validateAssemblyDef(raw: unknown, defs: Record<string, ModuleDef
       return [ref];
     });
   const params = (list: unknown): ParamRef[] =>
-    (Array.isArray(list) ? list : []).flatMap((r: unknown) => {
+    tidyRows((Array.isArray(list) ? list : []).flatMap((r: unknown) => {
       if (!isRec(r)) return [];
       const t = typeOf(Number(r.module));
-      if (!t || !defs[t].params.some((q) => q.name === r.param)) throw new Error(`promoted parameter "${String(r.param)}" does not exist`);
-      return [{ module: Number(r.module), param: String(r.param), label: String(r.label ?? r.param) }];
-    });
+      const pd = t ? rowDef(defs[t], String(r.param)) : undefined;
+      if (!pd) throw new Error(`promoted parameter "${String(r.param)}" does not exist`);
+      if (pd.onScreen) return []; // set on its module's screen: not a row of the card
+      return [{ module: Number(r.module), param: String(r.param), label: String(r.label ?? r.param), ...rowLayout(r) }];
+    }));
   const moduleOf = (id: number): ModuleInst | undefined => d.modules.find((m) => m.id === id);
   d.params = params(d.params);
   d.inputs = pinsToParams(ports(d.inputs, 'in'), d.params, moduleOf);
@@ -1025,7 +1137,7 @@ export function fixAssemblies(p: Patch, defs: Record<string, ModuleDef>): string
       modules: [...new Set(members)],
       inputs: refs(e.inputs, 'port'),
       outputs: refs(e.outputs, 'port').map((r) => ({ module: r.module, port: r.port, label: r.label })),
-      params: refs(e.params, 'param') as unknown as ParamRef[],
+      params: tidyRows(refs(e.params, 'param') as unknown as ParamRef[]),
     };
     if (e.poly) a.poly = fixCards(e.poly);
     for (const m of a.modules) used.add(m);
@@ -1077,7 +1189,7 @@ export function fixAssemblies(p: Patch, defs: Record<string, ModuleDef>): string
 function refs(list: unknown, key: 'port' | 'param'): PortRef[] {
   return (Array.isArray(list) ? list : []).flatMap((r: unknown) => {
     if (!isRec(r) || !Number.isInteger(Number(r.module)) || typeof r[key] !== 'string') return [];
-    const ref = { module: Number(r.module), [key]: r[key], label: String(r.label ?? r[key]) } as unknown as PortRef;
+    const ref = { module: Number(r.module), [key]: r[key], label: String(r.label ?? r[key]), ...(key === 'param' ? rowLayout(r) : {}) } as unknown as PortRef;
     if (key === 'port' && Array.isArray(r.also)) {
       const also = r.also.flatMap((t: unknown) => (isRec(t) && Number.isInteger(Number(t.module)) && typeof t.port === 'string' ? [{ module: Number(t.module), port: t.port }] : []));
       if (also.length) ref.also = also;

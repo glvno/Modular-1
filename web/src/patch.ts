@@ -42,6 +42,10 @@ export interface ParamDef {
   toggle?: boolean;
   /** while the toggle parameter `when` is on, the value is shown as `text(value)` instead of the number (the synced delay time as a note length) */
   altText?: { when: string; text: (v: number) => string };
+  /** not a value: a display (the Scope's screen); it has no slider and goes on an assembly card like a parameter */
+  screen?: true;
+  /** set from its module's screen (the Scope's hover toolbar), never a row of a card nor promoted */
+  onScreen?: true;
 }
 
 /** position of a value in its range, 0..1 (logarithmic for log parameters) */
@@ -89,7 +93,16 @@ export interface ModuleDef {
   paramInputs?: boolean;
   /** the input a bypassed module passes to all of its outputs; default: the input called `in`, or none (the outputs are silent) */
   thru?: string;
+  /**
+   * Displays (the Scope's screen, an envelope's shape): editor-only entries a card draws and an assembly card can show
+   * like a parameter (ParamRef.param names one), but not parameters: no value, never in `params`, so the engines, the
+   * binary format and the firmware never see them.
+   */
+  views?: ParamDef[];
 }
+
+/** a parameter or a display of a module type, by name (what a ParamRef can name) */
+export const rowDef = (def: ModuleDef, name: string): ParamDef | undefined => def.params.find((q) => q.name === name) ?? def.views?.find((q) => q.name === name);
 
 /** the input a bypassed module of this definition passes through, undefined when it mutes instead */
 export const thruInput = (def: ModuleDef): string | undefined => def.thru ?? (def.inputs.some((p) => p.name === 'in') ? 'in' : undefined);
@@ -323,6 +336,8 @@ export function ensureMain(p: Patch, defs: Record<string, ModuleDef>): boolean {
 
 /** modules that run once even inside a poly assembly: their inputs sum the parts (big state, or the end of the chain) */
 export const SHARED_TYPES = new Set(['delay', 'reverb', 'chorus', 'grain', 'output']);
+/** module types the editor shows but the engines and the FM-1 never run: poly.ts deviceView drops them and their cables */
+export const EDITOR_ONLY = new Set(['scope']);
 
 export function nextId(p: Patch): number {
   return p.modules.reduce((m, x) => Math.max(m, x.id), 0) + 1;

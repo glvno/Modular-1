@@ -148,7 +148,8 @@
     {
       "module": 1,
       "param": "rate",
-      "label": "tempo"
+      "label": "tempo",
+      "head": "sequence"
     },
     {
       "module": 2,
@@ -173,7 +174,8 @@
     {
       "module": 2,
       "param": "s1",
-      "label": "s1"
+      "label": "s1",
+      "head": "steps"
     },
     {
       "module": 2,
